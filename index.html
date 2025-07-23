@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>농어촌 차량 추적 시스템</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    
+    <!-- Google Maps JavaScript API -->
+    <script async defer 
+        src="https://maps.googleapis.com/maps/api/js?key=YOUR_API_KEY&callback=initMap&libraries=geometry">
+    </script>
+    <style>
+      /* 지도 컨테이너 스타일 */
+      .map-container {
+        height: 400px;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 2px solid #e5e7eb;
+      }
+      
+      /* 커스텀 마커 스타일 */
+      .custom-marker {
+        background: #dc2626;
+        border: 3px solid white;
+        border-radius: 50%;
+        width: 20px;
+        height: 20px;
+        animation: pulse 2s infinite;
+      }
+      
+      @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+      }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useRef } = React;
+
+      function RuralVehicleTracker() {
+        const [isTracking, setIsTracking] = useState(false);
+        
+        // 실제 GPS 연동
+        const [position, setPosition] = useState({
+          latitude: null,
+          longitude: null,
+          timestamp: null,
+          accuracy: null,
+          error: null
+        });
+
+        const [watchId, setWatchId] = useState(null);
+        const [map, setMap] = useState(null);
+        const [marker, setMarker] = useState(null);
+        const [locationHistory, setLocationHistory] = useState([]);
+        const [isOnline, setIsOnline] = useState(navigator.onLine);
+        const [vehicleId, setVehicleId] = useState('');
+        const mapRef = useRef(null);
+
+        // Firebase 설정
+        const firebaseConfig = {
+          // 여기에 Firebase 프로젝트 설정을 입력하세요
+          apiKey: "YOUR_FIREBASE_API_KEY",
+          authDomain: "your-project.firebaseapp.com",
+          projectId: "your-project-id",
+          storageBucket: "your-project.appspot.com",
+          messagingSenderId: "123456789",
+          appId: "your-app-id"
+        };
+
+        // Firebase 초기화
+        const initFirebase = () => {
+          if (!window.firebase || window.firebase.apps.length > 0) return;
+          
+          try {
+            window.firebase.initializeApp(firebaseConfig);
+            console.log('Firebase 초기화 완료');
+          } catch (error) {
+            console.log('Firebase 초기화 오류 (설정 필요):', error);
+          }
+        };
+
+        // Firestore에 위치 데이터 저장
+        const saveLocationToFirebase = async (locationData) => {
+          if (!window.firebase || !window.firebase.apps.length) return;
+          
+          try {
+            const db = window.firebase.firestore();
+            const docRef = await db.collection('vehicle_locations').add({
+              vehicleId: vehicleId || 'unknown_vehicle',
+              latitude: locationData.latitude,
+              longitude: locationData.longitude,
+              accuracy: locationData.accuracy,
+              timestamp: window.firebase.firestore.FieldValue.serverTimestamp(),
+              localTime: locationData.timestamp
+            });
+            
+            console.log('위치 데이터 저장 완료:', docRef.id);
+          } catch (error) {
+            console.error('Firebase 저장 오류:', error);
+          }
+        };
+
+        // 온라인 상태 감지
+        useEffect(() => {
+          const handleOnline = () => setIsOnline(true);
+          const handleOffline = () => setIsOnline(false);
+          
+          window.addEventListener('online', handleOnline);
+          window.addEventListener('offline', handleOffline);
+          
+          return () => {
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+          };
+        }, []);
+
+        // Google Maps 초기화
+        const initializeMap = (lat, lng) => {
+          if (!window.google || !mapRef.current) return;
+
+          const mapOptions = {
+            center: { lat: lat, lng: lng },
+            zoom: 16,
+            mapTypeId: window.google.maps.MapTypeId.HYBRID, // 위성 지도
+            disableDefaultUI: false,
+            zoomControl: true,
+            streetViewControl: false,
+            fullscreenControl: true,
+          };
+
+          const newMap = new window.google.maps.Map(mapRef.current, mapOptions);
+          
+          // 차량 마커 추가
+          const newMarker = new window.google.maps.Marker({
+            position: { lat: lat, lng: lng },
+            map: newMap,
+            title: '농어촌 차량 위치',
+            icon: {
+              path: window.google.maps.SymbolPath.CIRCLE,
+              scale: 12,
+              fillColor: '#dc2626',
+              fillOpacity: 1,
+              strokeColor: '#ffffff',
+              strokeWeight: 3,
+            },
+            animation: window.google.maps.Animation.DROP
+          });
+
+          // 정확도 원 추가
+          const accuracyCircle = new window.google.maps.Circle({
+            strokeColor: '#3b82f6',
+            strokeOpacity: 0.8,
+            strokeWeight: 2,
+            fillColor: '#3b82f6',
+            fillOpacity: 0.2,
+            map: newMap,
+            center: { lat: lat, lng: lng },
+            radius: position.accuracy || 50
+          });
+
+          setMap(newMap);
+          setMarker(newMarker);
+        };
+
+        // 지도 위치 업데이트
+        const updateMapPosition = (lat, lng) => {
+          if (map && marker) {
+            const newPosition = { lat: lat, lng: lng };
+            marker.setPosition(newPosition);
+            map.setCenter(newPosition);
+            
+            // 마커 애니메이션
+            marker.setAnimation(window.google.maps.Animation.BOUNCE);
+            setTimeout(() => {
+              marker.setAnimation(null);
+            }, 2000);
+          }
+        };
+
+        // 실제 GPS 위치 가져오기
+        const getCurrentPosition = () => {
+          if (!navigator.geolocation) {
+            setPosition(prev => ({
+              ...prev,
+              error: 'GPS가 지원되지 않는 브라우저입니다'
+            }));
+            return;
+          }
+
+          const options = {
+            enableHighAccuracy: true, // 고정밀 GPS 사용
+            timeout: 10000, // 10초 타임아웃
+            maximumAge: 0 // 캐시된 위치 사용 안함
+          };
+
+          const success = (pos) => {
+            const { latitude, longitude, accuracy } = pos.coords;
+            const newPosition = {
+              latitude: latitude,
+              longitude: longitude,
+              timestamp: new Date().toLocaleTimeString(),
+              accuracy: Math.round(accuracy),
+              error: null
+            };
+            
+            setPosition(newPosition);
+            
+            // 위치 히스토리에 추가
+            setLocationHistory(prev => [...prev, {
+              ...newPosition,
+              id: Date.now()
+            }].slice(-50)); // 최근 50개만 유지
+            
+            // Firebase에 저장 (온라인 상태일 때만)
+            if (isOnline) {
+              saveLocationToFirebase(newPosition);
+            }
+            
+            // 지도 초기화 또는 업데이트
+            if (!map) {
+              setTimeout(() => initializeMap(latitude, longitude), 100);
+            } else {
+              updateMapPosition(latitude, longitude);
+            }
+          };
+
+          const error = (err) => {
+            let errorMessage = '';
+            switch(err.code) {
+              case err.PERMISSION_DENIED:
+                errorMessage = "위치 권한이 거부되었습니다";
+                break;
+              case err.POSITION_UNAVAILABLE:
+                errorMessage = "위치 정보를 사용할 수 없습니다";
+                break;
+              case err.TIMEOUT:
+                errorMessage = "위치 요청 시간이 초과되었습니다";
+                break;
+              default:
+                errorMessage = "알 수 없는 오류가 발생했습니다";
+                break;
+            }
+            setPosition(prev => ({
+              ...prev,
+              error: errorMessage
+            }));
+          };
+
+          if (isTracking) {
+            // 실시간 위치 추적 시작
+            const id = navigator.geolocation.watchPosition(success, error, options);
+            setWatchId(id);
+          } else {
+            // 위치 추적 중지
+            if (watchId) {
+              navigator.geolocation.clearWatch(watchId);
+              setWatchId(null);
+            }
+          }
+        };
+
+        useEffect(() => {
+          // Firebase 초기화
+          initFirebase();
+          
+          getCurrentPosition();
+          
+          // 컴포넌트 언마운트 시 추적 중지
+          return () => {
+            if (watchId) {
+              navigator.geolocation.clearWatch(watchId);
+            }
+          };
+        }, [isTracking]);
+
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 p-4">
+            <div className="max-w-md mx-auto space-y-6">
+              
+              {/* 헤더 */}
+              <div className="text-center">
+                <h1 className="text-3xl font-bold text-gray-800 mb-2">
+                  🌾 농어촌 차량 추적
+                </h1>
+                <p className="text-gray-600">실시간 GPS 위치 모니터링</p>
+              </div>
+
+              {/* 통합 설정 안내 */}
+              <div className="bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-200 rounded-lg p-4 mb-6">
+                <h4 className="font-semibold text-gray-800 mb-3">
+                  ⚙️ 완전한 기능 활성화 설정 가이드
+                </h4>
+                
+                {/* Google Maps 설정 */}
+                <div className="mb-4">
+                  <h5 className="font-medium text-blue-800 mb-1">🗺️ Google Maps API</h5>
+                  <div className="text-blue-700 text-sm space-y-1 pl-4">
+                    <p>• Google Cloud Console → Maps JavaScript API 활성화</p>
+                    <p>• API 키 생성 → <code className="bg-blue-200 px-1 rounded">YOUR_API_KEY</code> 교체</p>
+                  </div>
+                </div>
+                
+                {/* Firebase 설정 */}
+                <div>
+                  <h5 className="font-medium text-purple-800 mb-1">🔥 Firebase Database</h5>
+                  <div className="text-purple-700 text-sm space-y-1 pl-4">
+                    <p>• Firebase Console → 새 프로젝트 생성</p>
+                    <p>• Firestore Database 활성화</p>
+                    <p>• 웹 앱 등록 → <code className="bg-purple-200 px-1 rounded">firebaseConfig</code> 교체</p>
+                  </div>
+                </div>
+                
+                <div className="mt-3 p-2 bg-green-100 rounded text-xs text-green-700">
+                  💡 두 서비스 모두 무료 요금제로 충분히 사용 가능합니다!
+                </div>
+              </div>
+
+              {/* 차량 정보 설정 */}
+              <div className="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+                <h4 className="font-semibold text-gray-800 mb-3">
+                  🚜 차량 정보 설정
+                </h4>
+                
+                <div className="flex items-center space-x-4">
+                  <div className="flex-1">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      차량 식별번호:
+                    </label>
+                    <input
+                      type="text"
+                      value={vehicleId}
+                      onChange={(e) => setVehicleId(e.target.value)}
+                      placeholder="예: 농기계001, 트랙터A호, 마을버스"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                  
+                  {/* 온라인 상태 표시 */}
+                  <div className="flex items-center">
+                    <div className={`w-3 h-3 rounded-full mr-2 ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                    <span className="text-sm text-gray-600">
+                      {isOnline ? '온라인' : '오프라인'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* GPS 권한 안내 */}
+              {!isTracking && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+                  <h4 className="font-semibold text-yellow-800 mb-2">
+                    📱 GPS 사용 준비사항
+                  </h4>
+                  <ul className="text-yellow-700 text-sm space-y-1">
+                    <li>• 브라우저에서 <strong>"위치 권한 허용"</strong> 클릭</li>
+                    <li>• WiFi보다는 <strong>모바일 데이터</strong> 권장</li>
+                    <li>• 실외에서 사용 시 더 정확한 GPS 신호</li>
+                  </ul>
+                </div>
+              )}
+
+              {/* 추적 제어 버튼 */}
+              <div className="bg-white rounded-lg p-6 shadow-lg">
+                <button
+                  onClick={() => setIsTracking(!isTracking)}
+                  className={`w-full py-4 px-6 rounded-lg font-semibold text-lg transition-all ${
+                    isTracking 
+                      ? 'bg-red-500 hover:bg-red-600 text-white' 
+                      : 'bg-green-500 hover:bg-green-600 text-white'
+                  }`}
+                >
+                  {isTracking ? '⏹️ 추적 중지' : '▶️ 추적 시작'}
+                </button>
+                
+                <div className="mt-4 text-center">
+                  <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm ${
+                    isTracking 
+                      ? 'bg-red-100 text-red-600' 
+                      : 'bg-gray-100 text-gray-600'
+                  }`}>
+                    {isTracking ? '🔴 실시간 위치 추적 중...' : '⚫ 추적 대기 중'}
+                  </span>
+                </div>
+              </div>
+
+              {/* 실시간 위치 정보 */}
+              {isTracking && (
+                <div className="bg-white rounded-lg p-6 shadow-lg">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-4">
+                    📍 실시간 위치 정보
+                  </h3>
+                  
+                  {position.error ? (
+                    <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                      <p className="text-red-600">❌ {position.error}</p>
+                      <p className="text-sm text-red-500 mt-2">
+                        💡 브라우저에서 위치 권한을 허용해주세요
+                      </p>
+                    </div>
+                  ) : position.latitude ? (
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">위도:</span>
+                        <span className="font-mono text-blue-600">
+                          {position.latitude.toFixed(6)}°
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">경도:</span>
+                        <span className="font-mono text-blue-600">
+                          {position.longitude.toFixed(6)}°
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">정확도:</span>
+                        <span className="font-mono text-green-600">
+                          ±{position.accuracy}m
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">업데이트:</span>
+                        <span className="font-mono text-purple-600">
+                          {position.timestamp}
+                        </span>
+                      </div>
+                      
+                      {/* 구글 맵 링크 */}
+                      <div className="mt-4 pt-4 border-t border-gray-200">
+                        <a 
+                          href={`https://maps.google.com/?q=${position.latitude},${position.longitude}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                        >
+                          🗺️ 구글맵에서 보기
+                        </a>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                      <p className="text-yellow-600">📡 GPS 신호를 찾는 중...</p>
+                      <div className="mt-2 bg-yellow-200 rounded-full h-2">
+                        <div className="bg-yellow-500 h-2 rounded-full animate-pulse w-1/2"></div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 위치 히스토리 */}
+              {isTracking && locationHistory.length > 0 && (
+                <div className="bg-white rounded-lg p-6 shadow-lg">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-4">
+                    📊 위치 히스토리 ({locationHistory.length}개)
+                  </h3>
+                  
+                  <div className="max-h-64 overflow-y-auto space-y-2">
+                    {locationHistory.slice(-10).reverse().map((loc) => (
+                      <div key={loc.id} className="bg-gray-50 rounded-lg p-3 text-sm">
+                        <div className="flex justify-between items-center">
+                          <span className="font-mono text-blue-600">
+                            {loc.latitude.toFixed(4)}°, {loc.longitude.toFixed(4)}°
+                          </span>
+                          <span className="text-gray-500">{loc.timestamp}</span>
+                        </div>
+                        <div className="text-xs text-gray-400 mt-1">
+                          정확도: ±{loc.accuracy}m | 
+                          {isOnline ? ' 🔥 저장됨' : ' 📱 로컬 저장'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  
+                  {locationHistory.length > 10 && (
+                    <div className="text-center mt-3 text-sm text-gray-500">
+                      최근 10개 표시 (전체 {locationHistory.length}개 기록됨)
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 실시간 Google Maps */}
+              <div className="bg-white rounded-lg p-6 shadow-lg">
+                <h3 className="text-lg font-semibold text-gray-800 mb-4">
+                  🗺️ 실시간 위치 지도
+                </h3>
+                
+                {position.latitude ? (
+                  <div>
+                    <div ref={mapRef} className="map-container mb-4"></div>
+                    <div className="text-center text-sm text-gray-600">
+                      🛰️ 위성 지도 | 빨간 점: 현재 차량 위치 | 파란 원: GPS 정확도 범위
+                    </div>
+                  </div>
+                ) : (
+                  <div className="map-container bg-gray-100 flex items-center justify-center">
+                    <div className="text-center">
+                      <div className="text-4xl mb-2">🗺️</div>
+                      <p className="text-gray-500">GPS 신호를 기다리는 중...</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        위치 권한을 허용하면 지도가 표시됩니다
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+            </div>
+          </div>
+        );
+      }
+
+      ReactDOM.render(<RuralVehicleTracker />, document.getElementById('root'));
+    </script>
+</body>
+</html>
